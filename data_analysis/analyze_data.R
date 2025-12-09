@@ -89,7 +89,7 @@ analysis_data <- merged_data %>%
     Order = factor(Order_final)
   )
 
-### candidate models for AIC
+### candidate models for AIC with divergence time as fixed effect
 complete_data <- analysis_data %>%
   filter(complete.cases(k2p, z_timetree_div, z_body_size, z_clutch,
                         z_pop_density, z_genome_size, z_intersection,
@@ -155,21 +155,130 @@ if (nrow(complete_data) > 20) {
   print(summary(gam_model))
 }
 
-### class-specific models
+
+### candidate models for AIC with k2p scaled by divergence time
+
+# regress out divergence time
+fit_divtime <- lm(log_k2p ~ z_timetree_div, data = complete_data)
+complete_data$log_k2p_adj <- residuals(fit_divtime)
+
+cat("Divergence time regressed out; residuals stored as log_k2p_adj\n")
+
+# candidate models
+
+models_list_adj <- list()
+
+# intercept only (random effects only)
+models_list_adj[["m1"]] <- lmer(log_k2p_adj ~ 1 +
+                                  (1|Order) + (1|sp1_idx) + (1|sp2_idx),
+                                data = complete_data, REML = FALSE)
+
+# body size
+models_list_adj[["m2"]] <- lmer(log_k2p_adj ~ z_body_size +
+                                  (1|Order) + (1|sp1_idx) + (1|sp2_idx),
+                                data = complete_data, REML = FALSE)
+
+# body size + clutch
+models_list_adj[["m3"]] <- lmer(log_k2p_adj ~ z_body_size + z_clutch +
+                                  (1|Order) + (1|sp1_idx) + (1|sp2_idx),
+                                data = complete_data, REML = FALSE)
+
+# body size + clutch + population density
+models_list_adj[["m4"]] <- lmer(log_k2p_adj ~ z_body_size + z_clutch + z_pop_density +
+                                  (1|Order) + (1|sp1_idx) + (1|sp2_idx),
+                                data = complete_data, REML = FALSE)
+
+# body size + clutch + population density + genome size
+models_list_adj[["m5"]] <- lmer(log_k2p_adj ~ z_body_size + z_clutch + z_pop_density + z_genome_size +
+                                  (1|Order) + (1|sp1_idx) + (1|sp2_idx),
+                                data = complete_data, REML = FALSE)
+
+# all predictors including range overlap
+models_list_adj[["m6"]] <- lmer(log_k2p_adj ~ z_body_size + z_clutch + z_pop_density + z_genome_size + z_intersection +
+                                  (1|Order) + (1|sp1_idx) + (1|sp2_idx),
+                                data = complete_data, REML = FALSE,
+                                control = lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5)))
+
+# compute AIC
+model_aic_adj <- tibble(
+  Model = names(models_list_adj),
+  AIC = map_dbl(models_list_adj, ~ AIC(.x))
+) %>%
+  arrange(AIC) %>%
+  mutate(
+    delta_AIC = AIC - min(AIC),
+    AIC_weight = exp(-0.5 * delta_AIC) / sum(exp(-0.5 * delta_AIC))
+  )
+
+print(model_aic_adj)
+
+# best model
+best_model_name_adj <- model_aic_adj$Model[1]
+best_model_adj <- models_list_adj[[best_model_name_adj]]
+
+cat("\nBest model using divergence-adjusted k2p:", best_model_name_adj, "\n\n")
+print(summary(best_model_adj))
+
+### mammals and birds with k2p scaled by divergence time
+
 for (cl in c("Aves", "Mammalia")) {
-  subset <- complete_data %>% filter(Class == cl)
-  if (nrow(subset) > 100) {
-    m <- lmer(
-      log_k2p ~ z_timetree_div + z_body_size + z_clutch +
-        z_pop_density + z_genome_size + z_intersection +
-        (1|Order) + (1|sp1_idx) + (1|sp2_idx),
-      data = subset,
-      REML = FALSE
-    )
-    print(summary(m)$coefficients)
-    print(performance::r2_nakagawa(m))
+  cat("CLASS:", cl, "\n")
+  
+  class_data <- complete_data %>% filter(Class == cl)
+  
+  if (nrow(class_data) < 50) {
+    next
   }
+  
+  # candidate models
+  models_list_class <- list()
+  
+  models_list_class[["m1"]] <- lmer(log_k2p_adj ~ 1 +
+                                      (1|Order) + (1|sp1_idx) + (1|sp2_idx),
+                                    data = class_data, REML = FALSE)
+  
+  models_list_class[["m2"]] <- lmer(log_k2p_adj ~ z_body_size +
+                                      (1|Order) + (1|sp1_idx) + (1|sp2_idx),
+                                    data = class_data, REML = FALSE)
+  
+  models_list_class[["m3"]] <- lmer(log_k2p_adj ~ z_body_size + z_clutch +
+                                      (1|Order) + (1|sp1_idx) + (1|sp2_idx),
+                                    data = class_data, REML = FALSE)
+  
+  models_list_class[["m4"]] <- lmer(log_k2p_adj ~ z_body_size + z_clutch + z_pop_density +
+                                      (1|Order) + (1|sp1_idx) + (1|sp2_idx),
+                                    data = class_data, REML = FALSE)
+  
+  models_list_class[["m5"]] <- lmer(log_k2p_adj ~ z_body_size + z_clutch + z_pop_density + z_genome_size +
+                                      (1|Order) + (1|sp1_idx) + (1|sp2_idx),
+                                    data = class_data, REML = FALSE)
+  
+  models_list_class[["m6"]] <- lmer(log_k2p_adj ~ z_body_size + z_clutch + z_pop_density + z_genome_size + z_intersection +
+                                      (1|Order) + (1|sp1_idx) + (1|sp2_idx),
+                                    data = class_data, REML = FALSE,
+                                    control = lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5)))
+  
+  # calculate AIC
+  model_aic_class <- tibble(
+    Model = names(models_list_class),
+    AIC = map_dbl(models_list_class, ~ AIC(.x))
+  ) %>%
+    arrange(AIC) %>%
+    mutate(
+      delta_AIC = AIC - min(AIC),
+      AIC_weight = exp(-0.5 * delta_AIC) / sum(exp(-0.5 * delta_AIC))
+    )
+  
+  print(model_aic_class)
+  
+  # best model
+  best_model_name_class <- model_aic_class$Model[1]
+  best_model_class <- models_list_class[[best_model_name_class]]
+  
+  cat("\nBest model for", cl, ":", best_model_name_class, "\n")
+  print(summary(best_model_class))
 }
+
 
 ### plots
 
@@ -198,3 +307,5 @@ p2 <- ggplot(analysis_data, aes(timetree_div, k2p, color = Class)) +
   theme_minimal()
 
 ggsave("figures/divergence_vs_time.png", p2, width = 9, height = 6, dpi = 300)
+
+
