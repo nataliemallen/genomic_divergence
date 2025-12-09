@@ -308,4 +308,77 @@ p2 <- ggplot(analysis_data, aes(timetree_div, k2p, color = Class)) +
 
 ggsave("figures/divergence_vs_time.png", p2, width = 9, height = 6, dpi = 300)
 
+##### scatterplots
 
+dir.create("figures/scatterplots", showWarnings = FALSE)
+
+plot_vars <- list(
+  "Generation.time..years._avg" = "Generation time (years)",
+  "Body.size..kg._avg"         = "Body size (kg)",
+  "Clutch.size_avg"            = "Clutch size",
+  "timetree_div"               = "Timetree divergence (MYA)",
+  "Population.Density_avg"     = "Population density",
+  "intersection_km2"           = "Range overlap (km²)"
+)
+
+for (v in names(plot_vars)) {
+  
+  label <- plot_vars[[v]]
+  
+  # apply log10 where appropriate
+  if (all(analysis_data[[v]] > 0, na.rm = TRUE)) {
+    analysis_data[[paste0(v, "_plot")]] <- log10(analysis_data[[v]])
+    xvar <- paste0(v, "_plot")
+    xlab <- paste0(label, " (log₁₀ scale)")
+  } else {
+    xvar <- v
+    xlab <- label
+  }
+  
+  p <- ggplot(analysis_data, aes_string(x = xvar, y = "k2p", color = "Class")) +
+    geom_point(alpha = 0.4, size = 1.3) +
+    geom_smooth(method = "lm", se = TRUE) +
+    scale_y_log10() +
+    facet_wrap(~ Class, scales = "free") +
+    theme_minimal(base_size = 13) +
+    labs(
+      x = xlab,
+      y = "k2p divergence (log scale)",
+      title = paste("k2p vs", label, "by Class")
+    )
+  
+  outfile <- paste0("figures/scatterplots/k2p_vs_", v, ".png")
+  ggsave(outfile, p, width = 10, height = 7, dpi = 300)
+}
+
+# plots of raw data
+
+dir.create("figures/scatterplots_raw", showWarnings = FALSE)
+
+raw_plot_vars <- list(
+  "Generation.time..years._avg" = "Generation time (years)",
+  "Body.size..kg._avg"         = "Body size (kg)",
+  "Clutch.size_avg"            = "Clutch size",
+  "timetree_div"               = "Timetree divergence (MYA)",
+  "Population.Density_avg"     = "Population density",
+  "intersection_km2"           = "Range overlap (km²)"
+)
+
+for (v in names(raw_plot_vars)) {
+  
+  label <- raw_plot_vars[[v]]
+  
+  p_raw <- ggplot(analysis_data, aes_string(x = v, y = "k2p", color = "Class")) +
+    geom_point(alpha = 0.4, size = 1.3) +
+    geom_smooth(method = "lm", se = TRUE) +
+    facet_wrap(~ Class, scales = "free") +
+    theme_minimal(base_size = 13) +
+    labs(
+      x = label,
+      y = "k2p divergence (raw scale)",
+      title = paste("Raw-scale k2p vs", label, "by Class")
+    )
+  
+  outfile_raw <- paste0("figures/scatterplots_raw/k2p_vs_raw_", v, ".png")
+  ggsave(outfile_raw, p_raw, width = 10, height = 7, dpi = 300)
+}
