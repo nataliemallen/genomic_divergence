@@ -666,7 +666,6 @@ test_phylogenetic_signal <- function(df, tree, class_name) {
   return(list(lambda = lambda_result, K = K_result))
 }
 
-
 # 17) MODEL FORMULAS BY GROUP
 
 # define predictors for each taxonomic group
@@ -1044,13 +1043,6 @@ run_single_tree_analysis <- function(tree_id, tree_config, data_by_class) {
       saveRDS(phylo_signal, sprintf("results/diagnostics/%s_phylo_signal.rds", class_name))
     }
     
-    if (tree_id == 1) {
-      df_scaled  <- scale_predictors(df)
-      formula_str <- get_model_formula(class_name, "full")
-      predictors  <- str_extract_all(formula_str, "z_[a-z0-9_]+")[[1]]
-      saveRDS(vif_values, sprintf("results/diagnostics/%s_vif.rds", class_name))
-    }
-    
     tryCatch({
       cat("  Fitting average-only model...\n")
       fit_avg  <- fit_dyadic_phylo_model(df, A, class_name, "avg_only")
@@ -1273,3 +1265,4 @@ if (!file.exists(tree_config_path)) {
 results <- run_multi_tree_analysis(tree_config, data_by_class)
 
 save.image(file = sprintf("results/workspace_n%d_%s_trees.RData", N_TREES, RUN_CLASS))
+
