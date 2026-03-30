@@ -1,4 +1,4 @@
-# dyadic phylogenetic mixed model pipeline for birds 
+# dyadic phylogenetic mixed model pipeline for birds or mammals
 
 library(ape)
 library(brms)
@@ -394,11 +394,45 @@ normalize_tree_labels <- function(tree) {
 }
 
 # build phylogenetic covariance matrix from pruned tree
-build_phylo_cov <- function(tree) {
+build_phylo_cov <- function(tree, chronos_timeout = 300) {
   if (!is.ultrametric(tree)) {
     cat("  Tree not ultrametric, running chronos...\n")
-    tree <- chronos(tree, quiet = TRUE)
+    
+    tree <- tryCatch({
+      setTimeLimit(elapsed = chronos_timeout, transient = TRUE)
+      result <- chronos(tree, quiet = TRUE)
+      setTimeLimit(elapsed = Inf, transient = TRUE)
+      cat("  chronos completed successfully\n")
+      result
+    }, error = function(e) {
+      setTimeLimit(elapsed = Inf, transient = TRUE)
+      if (grepl("time limit", e$message, ignore.case = TRUE)) {
+        cat(sprintf("  chronos timed out after %d seconds — trying force.ultrametric\n",
+                    chronos_timeout))
+      } else {
+        cat(sprintf("  chronos failed (%s) — trying force.ultrametric\n", e$message))
+      }
+      return(NULL)
+    })
+    
+    # fallback if chronos failed or timed out
+    if (is.null(tree)) {
+      tree <- tryCatch({
+        phytools::force.ultrametric(tree, method = "extend")
+      }, error = function(e) {
+        cat(sprintf("  force.ultrametric also failed: %s\n", e$message))
+        return(NULL)
+      })
+      if (!is.null(tree)) {
+        cat("  Tree made ultrametric via force.ultrametric (branch extension)\n")
+      }
+    }
+    
+    if (is.null(tree)) {
+      stop("Could not make tree ultrametric — skipping this tree")
+    }
   }
+  
   A <- vcv.phylo(tree, corr = TRUE)
   cat(sprintf("  Phylogenetic covariance matrix: %d x %d\n", nrow(A), ncol(A)))
   return(A)
@@ -1026,7 +1060,17 @@ run_single_tree_analysis <- function(tree_id, tree_config, data_by_class) {
     }
     
     tree_pruned <- pruning_result$tree
-    A  <- build_phylo_cov(tree_pruned)
+    A <- tryCatch(
+      build_phylo_cov(tree_pruned),
+      error = function(e) {
+        cat(sprintf("  build_phylo_cov failed for %s tree %d: %s — skipping\n",
+                    class_name, tree_id, e$message))
+        return(NULL)
+      }
+    )
+
+    if (is.null(A)) next
+
     df <- prepare_brms_data(data_by_class[[class_name]], tree_pruned)
     
     if (nrow(df) < 10) {
@@ -1061,14 +1105,22 @@ run_single_tree_analysis <- function(tree_id, tree_config, data_by_class) {
       saveRDS(posterior_diff,
         sprintf("results/posteriors/%s_tree%04d_diff_only.rds",
                 class_name, tree_id))
-      cat(sprintf("  ✓ Saved posterior: %s\n", posterior_file))
       
       model_summary <- list(
-        formula            = formula(fit),
-        nobs               = nobs(fit),
-        diagnostics        = diag,
-        variance_components = VarCorr(fit, summary = TRUE)
+        avg_model = list(
+          formula = formula(fit_avg),
+          nobs = nobs(fit_avg),
+          diagnostics = diag_avg,
+          variance_components = VarCorr(fit_avg, summary = TRUE)
+        ),
+        diff_model = list(
+          formula = formula(fit_diff),
+          nobs = nobs(fit_diff),
+          diagnostics = diag_diff,
+          variance_components = VarCorr(fit_diff, summary = TRUE)
+        )
       )
+      
       summary_file <- sprintf("results/models/%s_tree%04d_summary.rds",
                               class_name, tree_id)
       saveRDS(model_summary, summary_file)
@@ -1119,40 +1171,141 @@ run_single_tree_analysis <- function(tree_id, tree_config, data_by_class) {
 
 # 23) multi tree pipeline 
 
-run_multi_tree_analysis <- function(tree_config, data_by_class) {
+# ── TREE SUBSTITUTION POOL ────────────────────────────────────────────────────
+# When a tree fails (chronos timeout, pruning failure, etc.), automatically
+# draw a replacement from the same posterior distribution so N stays constant.
+
+generate_tree_config_with_substitutes <- function(n_trees, n_reserve = 50, seed = SEED) {
+  set.seed(seed)
+  # Generate more trees than needed — extras serve as substitutes
+  full_config <- generate_tree_sample_config(n_trees = n_trees + n_reserve)
+  
+  list(
+    primary   = full_config[1:n_trees, ],
+    reserve   = full_config[(n_trees + 1):(n_trees + n_reserve), ]
+  )
+}
+
+run_multi_tree_analysis <- function(tree_config_list, data_by_class) {
+  
+  # accept either old-style single config or new list with reserve pool
+  if (is.data.frame(tree_config_list)) {
+    tree_config <- tree_config_list
+    reserve     <- NULL
+  } else {
+    tree_config <- tree_config_list$primary
+    reserve     <- tree_config_list$reserve
+  }
+  
   n_trees     <- nrow(tree_config)
   class_names <- names(data_by_class)
   
-  cat("\n")
-  cat("=================================================\n")
+  cat("\n=================================================\n")
   cat(sprintf("RUNNING ANALYSIS ON %d TREES\n", n_trees))
+  if (!is.null(reserve)) {
+    cat(sprintf("Reserve pool: %d substitute trees available\n", nrow(reserve)))
+  }
   cat(sprintf("Parallelization: %s\n", ifelse(USE_PARALLEL, "ENABLED", "DISABLED")))
   cat("=================================================\n")
   
-  # Report checkpoint status before starting
   n_already_done <- report_checkpoint_status(n_trees, class_names)
   
   if (n_already_done == n_trees) {
     cat("All trees already complete. Consolidating results.\n")
-    all_results <- consolidate_checkpoints(n_trees, class_names)
-  } else {
-    if (USE_PARALLEL && n_trees > 1) {
-      plan(multisession, workers = N_CORES)
-      cat(sprintf("Using %d cores for parallel processing\n", N_CORES))
-      
-      all_results <- future_map(1:n_trees, function(i) {
-        run_single_tree_analysis(i, tree_config, data_by_class)
-      }, .options = furrr_options(seed = TRUE),
-      .progress = TRUE)
-      
+    return(consolidate_checkpoints(n_trees, class_names))
+  }
+  
+  # track which reserve trees have been used
+  reserve_used  <- 0
+  all_results   <- vector("list", n_trees)
+  
+  run_one_tree <- function(i, config_row) {
+    result <- run_single_tree_analysis(i, config_row, data_by_class)
+    
+    # check if this tree produced usable results for all classes
+    has_error <- sapply(class_names, function(cn) {
+      r <- result[[cn]]
+      is.null(r) || 
+        isTRUE(r$skipped) ||
+        (!is.null(r$avg_model) && !is.null(r$avg_model$diagnostics$error))
+    })
+    
+    return(list(result = result, failed_classes = class_names[has_error]))
+  }
+  
+  i <- 1
+  reserve_idx <- 1
+  
+  while (i <= n_trees) {
+    
+    # skip if already checkpointed
+    if (tree_is_complete(i, class_names)) {
+      cat(sprintf("  Tree %d already complete — loading from checkpoint.\n", i))
+      all_results[[i]] <- consolidate_checkpoints_single(i, class_names)
+      i <- i + 1
+      next
+    }
+    
+    # build a single-row config for this tree
+    config_row <- tree_config[i, , drop = FALSE]
+    # inject the tree_id as row index 1 so run_single_tree_analysis addresses it correctly
+    rownames(config_row) <- "1"
+    
+    cat(sprintf("\n>>> TREE %d (primary) <<<\n", i))
+    attempt <- run_one_tree(i, rbind(config_row, tree_config))  
+    # note: pass full config so tree_id indexing works; run_single_tree_analysis uses tree_id
+    
+    if (length(attempt$failed_classes) == 0) {
+      # success
+      all_results[[i]] <- attempt$result
+      i <- i + 1
     } else {
-      all_results <- vector("list", n_trees)
-      for (i in 1:n_trees) {
-        all_results[[i]] <- run_single_tree_analysis(i, tree_config, data_by_class)
+      # failure — try a substitute tree
+      cat(sprintf("  Tree %d failed for classes: %s\n",
+                  i, paste(attempt$failed_classes, collapse = ", ")))
+      
+      if (!is.null(reserve) && reserve_idx <= nrow(reserve)) {
+        cat(sprintf("  Substituting with reserve tree %d (pool index %d)\n",
+                    i, reserve_idx))
+        
+        # replace the failed row in tree_config with the reserve tree
+        # keep the same tree_id (i) so checkpoints write to the correct slot
+        tree_config[i, ] <- reserve[reserve_idx, ]
+        reserve_used      <- reserve_used + 1
+        reserve_idx       <- reserve_idx + 1
+        
+        # log the substitution
+        sub_log_path <- "results/checkpoints/substitution_log.csv"
+        sub_entry <- data.frame(
+          tree_id       = i,
+          original_tree = attempt$result$.failed_tree %||% "unknown",
+          substitute_from_reserve = reserve_idx - 1,
+          timestamp     = as.character(Sys.time())
+        )
+        if (file.exists(sub_log_path)) {
+          write_csv(bind_rows(read_csv(sub_log_path, show_col_types = FALSE),
+                              sub_entry), sub_log_path)
+        } else {
+          write_csv(sub_entry, sub_log_path)
+        }
+        
+        # retry with substitute — do NOT increment i
+        cat(sprintf("  Retrying tree slot %d with substitute...\n", i))
+        
+      } else {
+        cat(sprintf("  No reserve trees remaining — tree %d will be missing.\n", i))
+        all_results[[i]] <- list(skipped = TRUE, skip_reason = "no_reserve_available")
+        i <- i + 1
       }
     }
   }
   
+  if (reserve_used > 0) {
+    cat(sprintf("\n%d trees were substituted from the reserve pool.\n", reserve_used))
+    cat("See results/checkpoints/substitution_log.csv for details.\n")
+  }
+  
+  # synonym and pruning summaries
   all_synonym_logs <- unlist(
     lapply(all_results, function(tree_result) {
       sl <- tree_result[[".synonym_log"]]
@@ -1161,12 +1314,23 @@ run_multi_tree_analysis <- function(tree_config, data_by_class) {
     recursive = FALSE
   )
   summarize_synonym_substitutions(all_synonym_logs)
-  
   summarize_tree_pruning(class_names = class_names)
   
   return(all_results)
 }
 
+# load a single tree's results from checkpoints
+consolidate_checkpoints_single <- function(tree_id, class_names) {
+  result <- list()
+  for (cn in class_names) {
+    cp <- read_checkpoint(tree_id, cn)
+    if (!is.null(cp)) result[[cn]] <- cp
+  }
+  return(result)
+}
+
+# null coalescing operator
+`%||%` <- function(a, b) if (!is.null(a)) a else b
 
 # 24) resume system
 
@@ -1247,22 +1411,25 @@ consolidate_checkpoints <- function(n_trees, class_names) {
 
 # set seed before generating config so tree selection is identical if the job is restarted (same trees, same order)
 set.seed(SEED)
-tree_config <- generate_tree_sample_config(n_trees = N_TREES)
+tree_config_path      <- sprintf("results/tree_config_n%d.csv", N_TREES)
+tree_reserve_path     <- sprintf("results/tree_config_n%d_reserve.csv", N_TREES)
 
-# save config so resume runs use the exact same tree assignments
-tree_config_path <- sprintf("results/tree_config_n%d.csv", N_TREES)
 if (!file.exists(tree_config_path)) {
-
-  set.seed(SEED)
-  tree_config <- generate_tree_sample_config(n_trees = N_TREES)
-  write_csv(tree_config, tree_config_path)
+  config_list <- generate_tree_config_with_substitutes(N_TREES, n_reserve = 50)
+  write_csv(config_list$primary, tree_config_path)
+  write_csv(config_list$reserve, tree_reserve_path)
   cat(sprintf("Tree config saved: %s\n", tree_config_path))
 } else {
   cat(sprintf("Loading existing tree config: %s\n", tree_config_path))
-  tree_config <- read_csv(tree_config_path, show_col_types = FALSE)
+  config_list <- list(
+    primary = read_csv(tree_config_path, show_col_types = FALSE),
+    reserve = if (file.exists(tree_reserve_path))
+                read_csv(tree_reserve_path, show_col_types = FALSE)
+              else NULL
+  )
 }
 
-results <- run_multi_tree_analysis(tree_config, data_by_class)
+results <- run_multi_tree_analysis(config_list, data_by_class)
 
 save.image(file = sprintf("results/workspace_n%d_%s_trees.RData", N_TREES, RUN_CLASS))
 
