@@ -1,5 +1,3 @@
-# analyze bird and mammal models
-
 library(tidyverse)
 library(patchwork)
 
@@ -69,29 +67,12 @@ labels_diff_rate <- c(
   b_sympatric          = "Sympatric"
 )
 
-# pPCA regression predictor labels (2 global + 1 local axes; must match
-# N_PPC_GLOBAL / N_PPC_LOCAL in bird_model_github.R). Interpret the axes via the
-# loadings table produced in the pPCA section below.
-N_PPC_GLOBAL <- 2
-N_PPC_LOCAL  <- 1
-N_PPC        <- N_PPC_GLOBAL + N_PPC_LOCAL
-ppc_axis_tag <- c(rep("global", N_PPC_GLOBAL), rep("local", N_PPC_LOCAL))
-
-make_ppca_labels <- function(suffix) {
-  ax  <- paste0("b_ppc", seq_len(N_PPC), suffix)
-  lab <- sprintf("pPC%d %s (%s)", seq_len(N_PPC),
-                 sub("_", "", suffix), ppc_axis_tag)
-  setNames(c("Divergence Time", lab, "Sympatric"),
-           c("b_z_timetree", ax, "b_sympatric"))
-}
-labels_ppca_avg  <- make_ppca_labels("_avg")
-labels_ppca_diff <- make_ppca_labels("_diff")
-
+# The phylogenetic PCA is fit AND summarized in the separate ppca_analysis.R;
+# this script covers only the PMM trait models.
 label_map <- if (MODEL_VARIANT == "rate") {
   list(avg_only = labels_avg_rate, diff_only = labels_diff_rate)
 } else {
-  list(avg_only  = labels_avg_standard, diff_only  = labels_diff_standard,
-       ppca_avg  = labels_ppca_avg,     ppca_diff  = labels_ppca_diff)
+  list(avg_only = labels_avg_standard, diff_only = labels_diff_standard)
 }
 
 class_colors <- c(birds = "#2980B9", mammals = "#C0392B")
@@ -604,104 +585,6 @@ write_csv(all_summaries,
 write_csv(credibility_summary,
           file.path(OUT_DIR, "credibility_summary_all_classes_models.csv"))
  
-# ── STEP 8: pPCA REGRESSION SUMMARY (Sundaram et al. 2015 approach) ────────────
-# Two deliverables, mirroring the paper:
-#   (1) axis-effect table = which life-history STRATEGY axis predicts divergence
-#       (the Table 2 equivalent), pooled across trees.
-#   (2) loadings + Moran table = how to INTERPRET each axis (which traits define
-#       it, and whether it is phylogenetically structured [global] or not [local]).
-
-PPCA_DIR         <- file.path(RESULTS_DIR, "ppca")
-ppca_model_types <- c("ppca_avg", "ppca_diff")
-
-cat("\n=== pPCA REGRESSION: axis-effect table ===\n")
-ppca_posteriors <- list()
-for (cn in CLASSES) {
-  for (mt in ppca_model_types) {
-    res <- load_and_pool(cn, mt)
-    if (!is.null(res)) ppca_posteriors[[paste(cn, mt)]] <- res
-  }
-}
-ppca_effects <- bind_rows(map(ppca_posteriors,
-                              ~ if (!is.null(.x)) .x$summary else NULL))
-if (nrow(ppca_effects) > 0) {
-  ppca_effects %>%
-    dplyr::select(class, model_type, predictor, median, q025, q975,
-                  credible, prob_directed) %>%
-    arrange(class, model_type, desc(abs(median))) %>%
-    print(n = 100)
-  write_csv(ppca_effects, file.path(OUT_DIR, "ppca_axis_effects.csv"))
-} else {
-  cat("  No pPCA regression posteriors found (run bird_model_github.R with RUN_PPCA=TRUE).\n")
-}
-
-# ---- axis interpretation: average aligned loadings + Moran across trees -------
-read_class_ppca <- function(cn) {
-  files <- list.files(PPCA_DIR,
-                      pattern = sprintf("^%s_tree[0-9]+_ppca\\.rds$", cn),
-                      full.names = TRUE)
-  if (length(files) == 0) return(NULL)
-  objs <- lapply(files, readRDS)
-  ax   <- names(objs[[1]]$ax_type)
-  load_mean <- map_dfr(objs, function(o)
-      tidyr::pivot_longer(o$loadings, all_of(ax),
-                          names_to = "axis", values_to = "loading")) %>%
-    group_by(trait, axis) %>%
-    summarize(loading = mean(loading), .groups = "drop") %>%
-    mutate(class = cn)
-  moran_sum <- map_dfr(objs, ~ tibble(axis = names(.x$moran_p),
-                                      moran_p = as.numeric(.x$moran_p))) %>%
-    group_by(axis) %>%
-    summarize(moran_p_median = median(moran_p, na.rm = TRUE),
-              moran_p_max    = max(moran_p,    na.rm = TRUE), .groups = "drop") %>%
-    mutate(class = cn,
-           axis_type = objs[[1]]$ax_type[axis])
-  list(loadings = load_mean, moran = moran_sum, n_trees = length(objs))
-}
-
-ppca_meta <- map(CLASSES, read_class_ppca) %>% setNames(CLASSES)
-ppca_loadings <- bind_rows(map(ppca_meta, ~ if (!is.null(.x)) .x$loadings else NULL))
-ppca_moran    <- bind_rows(map(ppca_meta, ~ if (!is.null(.x)) .x$moran    else NULL))
-
-if (nrow(ppca_loadings) > 0) {
-  cat("\n=== pPCA axis interpretation: mean trait loadings ===\n")
-  ppca_loadings %>%
-    pivot_wider(names_from = axis, values_from = loading) %>%
-    arrange(class) %>% print(n = 100)
-  write_csv(ppca_loadings, file.path(OUT_DIR, "ppca_loadings_mean.csv"))
-  cat("\n=== pPCA axis phylogenetic autocorrelation (Abouheif/Moran) ===\n")
-  cat("KEY CHECK: global axes SHOULD be phylogenetically autocorrelated (p<0.05);\n")
-  cat("local axes SHOULD NOT be. '** UNEXPECTED **' means reconsider the axis split.\n")
-  ppca_moran <- ppca_moran %>%
-    mutate(expectation = ifelse(axis_type == "global",
-                                "expect p<0.05", "expect p>=0.05"),
-           check = case_when(
-             axis_type == "global" & moran_p_max <  0.05 ~ "OK",
-             axis_type == "local"  & moran_p_median >= 0.05 ~ "OK",
-             TRUE ~ "** UNEXPECTED **"))
-  print(ppca_moran, n = 100)
-  write_csv(ppca_moran, file.path(OUT_DIR, "ppca_axis_moran.csv"))
-
-  # Biplot of the two global axes (ppc1 vs ppc2) per class
-  bip <- ppca_loadings %>% filter(axis %in% c("ppc1", "ppc2")) %>%
-    pivot_wider(names_from = axis, values_from = loading)
-  if (all(c("ppc1", "ppc2") %in% names(bip))) {
-    p_bip <- ggplot(bip, aes(x = ppc1, y = ppc2)) +
-      geom_hline(yintercept = 0, color = "grey80") +
-      geom_vline(xintercept = 0, color = "grey80") +
-      geom_segment(aes(x = 0, y = 0, xend = ppc1, yend = ppc2),
-                   arrow = arrow(length = unit(0.15, "cm")), color = "#2980B9") +
-      geom_text(aes(label = trait), size = 3, vjust = -0.4) +
-      facet_wrap(~ class) +
-      labs(title = "Phylogenetic PCA trait loadings (global axes)",
-           subtitle = "pPC1 vs pPC2 — averaged across trees",
-           x = "pPC1 loading", y = "pPC2 loading") +
-      theme_minimal(base_size = 12)
-    ggsave(file.path(OUT_DIR, "ppca_biplot_loadings.png"),
-           p_bip, width = 10, height = 5, dpi = 150)
-  }
-}
-
 cat("\n=== COMPLETE ===\n")
 cat(sprintf("Figures saved to: %s\n", OUT_DIR))
 cat(sprintf("Tables saved to: %s\n", OUT_DIR))
