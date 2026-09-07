@@ -6,7 +6,6 @@ params.final_genomes = "/scratch/negishi/allen715/shared/nextflow/gd_pipe/final_
 params.pairs = "/scratch/negishi/allen715/shared/nextflow/gd_pipe/batch1_pairs_old.csv"
 params.bin_dir = "/scratch/negishi/allen715/shared/nextflow/gd_pipe/bin"
 params.alignment_output = "/scratch/negishi/allen715/shared/nextflow/gd_pipe/alignments"
-params.divergence_output = "/scratch/negishi/allen715/shared/nextflow/gd_pipe/divergence"
 
 process align_genomes {
     tag "$pair"
@@ -40,36 +39,7 @@ process align_genomes {
     """
 }
 
-process calculate_divergence {
-    tag "$pair"
-    clusterOptions '--ntasks 16 --time 1-00:00:00 -A johnwayne'
-
-    input:
-    tuple val(pair), path(srt_paf), path(var_file)
-
-    output:
-    path("${pair}_distance.csv")
-
-    publishDir params.divergence_output, mode: 'copy'
-
-    script:
-    """
-    echo "Processing pair: ${pair}"
-    echo "PAF file: ${srt_paf}"
-    echo "VAR file: ${var_file}"
-    
-    python3 ${params.bin_dir}/calc_div.py ${var_file} ${srt_paf} \$PWD ${pair}
-    
-    if [[ -f \$PWD/${pair}_distance.csv ]]; then
-        echo "Output file ${pair}_distance.csv generated successfully."
-    else
-        echo "Error: Output file ${pair}_distance.csv not found."
-        exit 1
-    fi
-    """
-}
-
-// Workflow for alignment and divergence calculation
+// Workflow for alignment
 workflow {
     // Process genome pairs from the pairs.csv file
     Channel.fromPath(params.pairs)
@@ -81,6 +51,5 @@ workflow {
         }
         | filter { pair, genome1, genome2 -> genome1.exists() && genome2.exists() }
         | align_genomes
-        | calculate_divergence
         | collect
 }
