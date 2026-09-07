@@ -1,0 +1,3 @@
+1. main_step1.nf is the nextflow pipeline to download genomes
+2. main_step1.nf is the nextflow pipeline to align genomes
+3. then, calculate k2p divergence with the python script
